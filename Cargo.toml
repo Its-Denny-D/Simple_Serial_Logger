@@ -12,3 +12,4 @@ license = "MIT"
 serialport = "4.0"
 csv = "1.1"
 clap = { version = "4.1", features = ["derive"] }
+chrono = "0.4.39"

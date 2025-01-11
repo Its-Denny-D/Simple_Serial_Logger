@@ -2,13 +2,16 @@ use clap::{Arg, Command};
 use std::{
     fs::File,
     io::{BufReader, BufRead},
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
-    sync::mpsc::{channel, Sender, Receiver},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+        Mutex,
+    },
     thread,
     time::Duration,
 };
-use serialport::SerialPort; // Ensure you have the serialport crate in Cargo.toml
 use csv::Writer;
+use chrono::Local;
 
 fn main() {
     // Parse command-line arguments using Clap
@@ -41,16 +44,30 @@ fn main() {
         .parse()
         .expect("Failed to parse baud rate");
 
+    // Initialize CSV writer and protect it with Mutex for thread-safe access
+    let csv_file = File::create("output.csv")
+        .unwrap_or_else(|e| panic!("Failed to create CSV file: {}", e));
+    let writer = Writer::from_writer(csv_file);
+    let writer = Arc::new(Mutex::new(writer));
+
+    // Write CSV headers
+    {
+        let mut w = writer.lock().unwrap();
+        let headers = vec!["Type", "Timestamp", "Run/End", "Value1", "Value2", "Value3", "Value4"];
+        w.write_record(&headers).expect("Failed to write CSV headers");
+        w.flush().expect("Failed to flush CSV writer");
+    }
+
     // Shared atomic flag to control recording
     let recording = Arc::new(AtomicBool::new(false));
-    let (tx, rx): (Sender<String>, Receiver<String>) = channel();
 
-    // Clone the recording flag and port name for the thread
+    // Clone for serial thread
     let recording_clone = Arc::clone(&recording);
+    let writer_clone = Arc::clone(&writer);
     let port_name_for_thread = port_name.clone();
 
-    // Spawn a thread to handle serial input
-    thread::spawn(move || {
+    // Spawn serial thread to handle incoming serial data
+    let serial_thread = thread::spawn(move || {
         // Open the serial port
         let port = serialport::new(&port_name_for_thread, baud_rate)
             .timeout(Duration::from_millis(100))
@@ -73,15 +90,49 @@ fn main() {
                     // Clean the data by removing tab characters and trimming whitespace
                     let data = buffer.trim().replace('\t', "").to_string();
 
-                    // Debug: Uncomment to see all received data
-                    // println!("Received: {}", data);
-
                     // Process only lines containing "UDP packet contents:"
                     if data.contains("UDP packet contents:") {
-                        // Send the cleaned data to the main thread if recording is active
                         if recording_clone.load(Ordering::Acquire) {
-                            if let Err(e) = tx.send(data) {
-                                eprintln!("Failed to send data to main thread: {}", e);
+                            let timestamp = get_timestamp();
+
+                            // Extract the actual UDP contents after the colon
+                            if let Some((_, payload)) = data.split_once(':') {
+                                let payload = payload.trim(); // e.g., "7551870,-2.45,-3.69,-9.15"
+
+                                // Split the payload by commas
+                                let fields: Vec<&str> = payload.split(',').collect();
+
+                                // Ensure the payload has the expected number of fields (4)
+                                let expected_len = 4;
+                                if fields.len() == expected_len {
+                                    let record = vec![
+                                        "data",
+                                        &timestamp,
+                                        "",
+                                        fields[0],
+                                        fields[1],
+                                        fields[2],
+                                        fields[3],
+                                    ];
+
+                                    // Write the record to CSV
+                                    let mut w = writer_clone.lock().unwrap();
+                                    if let Err(e) = w.write_record(&record) {
+                                        eprintln!("Failed to write data record to CSV: {}", e);
+                                    }
+                                    if let Err(e) = w.flush() {
+                                        eprintln!("Failed to flush CSV writer: {}", e);
+                                    }
+                                } else {
+                                    eprintln!(
+                                        "Warning: Unexpected number of fields (expected {}, got {}). Data: {}",
+                                        expected_len,
+                                        fields.len(),
+                                        payload
+                                    );
+                                }
+                            } else {
+                                eprintln!("Warning: 'UDP packet contents:' not found in data: {}", data);
                             }
                         }
                     }
@@ -96,20 +147,8 @@ fn main() {
         }
     });
 
-    // CSV writer setup
-    let csv_file = File::create("output.csv").unwrap_or_else(|e| panic!("Failed to create CSV file: {}", e));
-    let mut writer = Writer::from_writer(csv_file);
-
-    // Optional: Write CSV headers
-    // Uncomment the following lines if you want headers in your CSV
-    /*
-    if let Err(e) = writer.write_record(&["Timestamp", "Value1", "Value2", "Value3"]) {
-        eprintln!("Failed to write CSV headers: {}", e);
-    }
-    writer.flush().unwrap();
-    */
-
-    // Command loop in the main thread
+    // Main thread: handle user commands
+    let mut run_num :i64 = 0;
     loop {
         println!("Enter a command (start, stop, exit):");
         let mut command = String::new();
@@ -121,55 +160,78 @@ fn main() {
 
         match command {
             "start" => {
-                recording.store(true, Ordering::Relaxed);
-                println!("Recording started.");
+                if !recording.load(Ordering::Relaxed) {
+                    recording.store(true, Ordering::Relaxed);
+                    println!("Recording started.");
+
+                    // Write start marker to CSV
+                    let timestamp = get_timestamp();
+                    let run_str = format!("run {}", run_num); // You can implement run numbering if needed
+                    run_num += 1;
+                    let start_record = vec!["start", &timestamp, &run_str, "", "", "", ""];
+                    let mut w = writer.lock().unwrap();
+                    if let Err(e) = w.write_record(&start_record) {
+                        eprintln!("Failed to write start record to CSV: {}", e);
+                    }
+                    if let Err(e) = w.flush() {
+                        eprintln!("Failed to flush CSV writer: {}", e);
+                    }
+                } else {
+                    println!("Recording is already started.");
+                }
             }
             "stop" => {
-                recording.store(false, Ordering::Relaxed);
-                println!("Recording stopped.");
+                if recording.load(Ordering::Relaxed) {
+                    recording.store(false, Ordering::Relaxed);
+                    println!("Recording stopped.");
+
+                    // Write stop marker to CSV
+                    let timestamp = get_timestamp();
+                    let stop_record = vec!["stop", &timestamp, "end of run", "", "", "", ""];
+                    let mut w = writer.lock().unwrap();
+                    if let Err(e) = w.write_record(&stop_record) {
+                        eprintln!("Failed to write stop record to CSV: {}", e);
+                    }
+                    if let Err(e) = w.flush() {
+                        eprintln!("Failed to flush CSV writer: {}", e);
+                    }
+                } else {
+                    println!("Recording is not active.");
+                }
             }
             "exit" => {
                 println!("Exiting...");
-                break;
+
+                // If recording is active, stop it first
+                if recording.load(Ordering::Relaxed) {
+                    recording.store(false, Ordering::Relaxed);
+                    println!("Recording stopped.");
+
+                    // Write stop marker to CSV
+                    let timestamp = get_timestamp();
+                    let stop_record = vec!["stop", &timestamp, "end of run", "", "", "", ""];
+                    let mut w = writer.lock().unwrap();
+                    if let Err(e) = w.write_record(&stop_record) {
+                        eprintln!("Failed to write stop record to CSV: {}", e);
+                    }
+                    if let Err(e) = w.flush() {
+                        eprintln!("Failed to flush CSV writer: {}", e);
+                    }
+                }
+
+                // Terminate the program
+                // Note: This will forcibly terminate the serial thread
+                std::process::exit(0);
             }
             _ => {
                 println!("Unknown command. Use 'start', 'stop', or 'exit'.");
             }
         }
-
-        // Write data to CSV if available
-        while let Ok(data) = rx.try_recv() {
-            // Example data: "UDP packet contents: 185611,-2.85,-5.12,-8.35"
-
-            // Extract the actual UDP contents after the colon
-            if let Some((_, payload)) = data.split_once(':') {
-                let payload = payload.trim(); // "185611,-2.85,-5.12,-8.35"
-
-                // Split the payload by commas
-                let fields: Vec<&str> = payload.split(',').collect();
-
-                // Ensure the payload has the expected number of fields (e.g., 4)
-                let expected_len = 4;
-                if fields.len() == expected_len {
-                    if let Err(e) = writer.write_record(&fields) {
-                        eprintln!("Failed to write record to CSV: {}", e);
-                    }
-                } else {
-                    eprintln!(
-                        "Warning: Unexpected number of fields (expected {}, got {}). Data: {}",
-                        expected_len,
-                        fields.len(),
-                        payload
-                    );
-                }
-            } else {
-                eprintln!("Warning: 'UDP packet contents:' not found in data: {}", data);
-            }
-
-            // Flush the writer to ensure data is written to the file
-            if let Err(e) = writer.flush() {
-                eprintln!("Failed to flush CSV writer: {}", e);
-            }
-        }
     }
+}
+
+// Function to get the current timestamp in "YYYY-MM-DD HH:MM:SS" format
+fn get_timestamp() -> String {
+    let now = Local::now();
+    now.format("%Y-%m-%d %H:%M:%S").to_string()
 }
