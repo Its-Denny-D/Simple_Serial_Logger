@@ -1,0 +1,14 @@
+[package]
+name = "collect_acc_data"
+version = "0.1.0"
+edition = "2021"
+
+# Optional metadata
+authors = ["Your Name <you@example.com>"]
+description = "A Rust application to read serial data and store it in a CSV file."
+license = "MIT"
+
+[dependencies]
+serialport = "4.0"
+csv = "1.1"
+clap = { version = "4.1", features = ["derive"] }
