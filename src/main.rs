@@ -67,7 +67,7 @@ fn main() {
     let port_name_for_thread = port_name.clone();
 
     // Spawn serial thread to handle incoming serial data
-    let serial_thread = thread::spawn(move || {
+    let _serial_thread = thread::spawn(move || {
         // Open the serial port
         let port = serialport::new(&port_name_for_thread, baud_rate)
             .timeout(Duration::from_millis(100))
