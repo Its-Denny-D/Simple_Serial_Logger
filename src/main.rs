@@ -159,9 +159,6 @@ fn main() {
                     eprintln!("Error reading from serial port: {}", e);
                 }
             }
-
-            // Sleep briefly to prevent high CPU usage
-            thread::sleep(Duration::from_millis(10));
         }
     });
 
