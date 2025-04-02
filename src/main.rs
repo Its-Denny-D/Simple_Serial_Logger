@@ -2,6 +2,7 @@ use clap::{Arg, Command};
 use std::{
     fs::File,
     io::{BufReader, BufRead},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -34,6 +35,14 @@ fn main() {
                 .help("Baud rate for the serial port (e.g., 115200)")
                 .default_value("115200"),
         )
+        .arg(
+            Arg::new("output")
+                .short('o')
+                .long("output")
+                .value_name("OUTPUT")
+                .help("Path to output CSV file (e.g., ./data/output.csv)")
+                .default_value("output.csv"),
+        )
         .get_matches();
 
     // Retrieve command-line arguments
@@ -43,17 +52,26 @@ fn main() {
         .expect("Baud rate has a default value")
         .parse()
         .expect("Failed to parse baud rate");
+    let output_path = matches.get_one::<String>("output").expect("Output path has a default value");
+    
+    // Create output directory if it doesn't exist
+    if let Some(parent) = PathBuf::from(output_path).parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|e| panic!("Failed to create output directory: {}", e));
+        }
+    }
 
     // Initialize CSV writer and protect it with Mutex for thread-safe access
-    let csv_file = File::create("output.csv")
-        .unwrap_or_else(|e| panic!("Failed to create CSV file: {}", e));
+    let csv_file = File::create(output_path)
+        .unwrap_or_else(|e| panic!("Failed to create CSV file at {}: {}", output_path, e));
     let writer = Writer::from_writer(csv_file);
     let writer = Arc::new(Mutex::new(writer));
 
     // Write CSV headers
     {
         let mut w = writer.lock().unwrap();
-        let headers = vec!["Type", "Timestamp", "Run/End", "Value1", "Value2", "Value3", "Value4"];
+        let headers = vec!["Type", "Timestamp", "Run/End", "time (ms)", "X acc", "y acc", "z acc"];
         w.write_record(&headers).expect("Failed to write CSV headers");
         w.flush().expect("Failed to flush CSV writer");
     }
