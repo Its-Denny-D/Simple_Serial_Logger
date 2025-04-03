@@ -71,7 +71,7 @@ fn main() {
     // Write CSV headers
     {
         let mut w = writer.lock().unwrap();
-        let headers = vec!["Type", "Timestamp", "Run/End", "time (ms)", "X acc", "y acc", "z acc"];
+        let headers = vec!["Type", "Timestamp", "Run/End", "time (ms)", "X acc", "Y acc", "Z acc"];
         w.write_record(&headers).expect("Failed to write CSV headers");
         w.flush().expect("Failed to flush CSV writer");
     }
